@@ -4,6 +4,7 @@ import { User } from "../models/user.model";
 import { Employee } from "../models/employee.model";
 import { sequelize } from "../config/config";
 import { capitalizeName, getAuthUser, isValidEmail } from "../midleware/helper";
+import { UniqueConstraintError, ValidationError } from "sequelize";
 import path from "path";
 import fs from "fs";
 
@@ -83,9 +84,20 @@ export const createEmployee = async (req: Request, res: Response) => {
     await trans.commit();
 
     return res.status(201).json({ message: "Employee created successfully" });
-  } catch (error) {
+  } catch (error : unknown) {
     await trans.rollback();
-    return res.status(500).json({ message: "Internal Server Error" });
+    if (error instanceof UniqueConstraintError) {
+    const message = error.errors?.[0]?.message ?? "Duplicate value";
+    return res.status(409).json({ message });
+  }
+
+  if (error instanceof ValidationError) {
+    const message = error.errors?.[0]?.message ?? "Validation error";
+    return res.status(400).json({ message });
+  }
+
+  const message = error instanceof Error ? error.message : "Internal Server Error";
+  return res.status(500).json({ message });
   }
 };
 
@@ -114,77 +126,137 @@ export const uploadPhoto = async (req: Request, res: Response) => {
 export const updateEmployee = async (req: Request, res: Response) => {
   const userId = req.params.userId;
   const authUser = getAuthUser(req);
-  if (!userId)
-    return res.status(400).json({ message: "userId param is required" });
 
-  const trans = await sequelize.transaction();
+  if (!userId) return res.status(400).json({ message: "userId param is required" });
 
   try {
     const body = req.body as any;
-    const user = await User.findOne({ where: { id: userId } });
-    if (!user) return res.status(404).json({ message: "User not found" });
-    const employee = await Employee.findOne({ where: { userId } });
-    if (!employee)
-      return res.status(404).json({ message: "User details not found" });
 
-    const formatedName = body.name ? capitalizeName(body.name) : undefined;
 
-    if (body.name !== undefined) {
-      const formatted = capitalizeName(String(body.name));
-      user.name = formatted;
-      employee.fullName = formatted;
+    let hashedPassword: string | undefined = undefined;
+    if (body.password !== undefined && String(body.password).trim() !== "") {
+      hashedPassword = await bcrypt.hash(String(body.password), 10);
     }
 
-    if (body.email !== undefined) {
+    await sequelize.transaction(async (t) => {
+
+      const user = await User.findOne({
+        where: { id: userId },
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+      if (!user) {
+
+        const err: any = new Error("User not found");
+        err.status = 404;
+        throw err;
+      }
+
+      const employee = await Employee.findOne({
+        where: { userId },
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+      if (!employee) {
+        const err: any = new Error("User details not found");
+        err.status = 404;
+        throw err;
+      }
+
+
+      if (body.name !== undefined) {
+        const formatted = capitalizeName(String(body.name));
+        user.name = formatted;
+        employee.fullName = formatted;
+      }
+
+      if (body.email !== undefined) {
         if (isValidEmail(body.email) === false) {
-            return res.status(400).json({ message: "Invalid email format" });
+          const err: any = new Error("Invalid email format");
+          err.status = 400;
+          throw err;
         }
-    }
 
-    const isEmailExist = await User.findOne({ where: { email: body.email } });
-    if (isEmailExist && isEmailExist.id !== userId) {
-        return res.status(400).json({ message: "Email already in use" });
-    }
+        const isEmailExist = await User.findOne({
+          where: { email: body.email },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
 
-    user.email = body.email ?? user.email;
-    employee.email = body.email ?? employee.email;
-    employee.updatedBy = authUser.userName;
+        if (isEmailExist && isEmailExist.id !== userId) {
+          const err: any = new Error("Email already in use");
+          err.status = 400;
+          throw err;
+        }
 
-    if (body.password !== undefined) {
-      const hashedPassword = await bcrypt.hash(body.password, 10);
-      user.password = hashedPassword;
-    }
+        user.email = body.email;
+        employee.email = body.email;
+      }
 
-    if(body.role !== undefined) {
-      user.role = body.role;
-    }
+      employee.updatedBy = authUser.userName;
 
-        const setIfProvided = <T>(key: keyof Employee, value: T | undefined) => {
-      if (value !== undefined) (employee as any)[key] = value;
-    };
+      if (hashedPassword) {
+        user.password = hashedPassword;
+      }
 
-    setIfProvided("phoneNumber", body.phoneNumber);
-    setIfProvided("address", body.address);
-    setIfProvided("department", body.department);
-    setIfProvided("jobTitle", body.jobTitle);
-    setIfProvided("salary", body.salary);
-    setIfProvided("leaveAllowance", body.leaveAllowance);
-    setIfProvided("workLocation", body.workLocation);
-    setIfProvided("businessAddress", body.businessAddress);
-    setIfProvided("emergencyContact", body.emergencyContact);
-    setIfProvided("gender", body.gender);
-    setIfProvided("reportingTo", body.reportingTo);
-    setIfProvided("status", body.status);
-    if (body.dateOfJoining !== undefined) employee.dateOfJoining = new Date(body.dateOfJoining);
-    if (body.dateOfBirth !== undefined) employee.dateOfBirth = new Date(body.dateOfBirth);
+      if (body.role !== undefined) {
+        user.role = body.role;
+      }
 
-    await user.save({ transaction: trans });
-    await employee.save({ transaction: trans });
-    await trans.commit();
+      const setIfProvided = <T>(key: keyof Employee, value: T | undefined) => {
+        if (value !== undefined) (employee as any)[key] = value;
+      };
+
+      setIfProvided("phoneNumber", body.phoneNumber);
+      setIfProvided("address", body.address);
+      setIfProvided("department", body.department);
+      setIfProvided("jobTitle", body.jobTitle);
+      setIfProvided("salary", body.salary);
+      setIfProvided("leaveAllowance", body.leaveAllowance);
+      setIfProvided("workLocation", body.workLocation);
+      setIfProvided("businessAddress", body.businessAddress);
+      setIfProvided("emergencyContact", body.emergencyContact);
+      setIfProvided("gender", body.gender);
+      setIfProvided("reportingTo", body.reportingTo);
+      setIfProvided("status", body.status);
+
+
+      if (body.dateOfJoining !== undefined) {
+        if (body.dateOfJoining === null || String(body.dateOfJoining).trim() === "") {
+          employee.dateOfJoining = null as any; 
+        } else {
+          const d = new Date(body.dateOfJoining);
+          if (isNaN(d.getTime())) {
+            const err: any = new Error("Invalid dateOfJoining");
+            err.status = 400;
+            throw err;
+          }
+          employee.dateOfJoining = d as any;
+        }
+      }
+
+      if (body.dateOfBirth !== undefined) {
+        if (body.dateOfBirth === null || String(body.dateOfBirth).trim() === "") {
+          employee.dateOfBirth = null as any; 
+        } else {
+          const d = new Date(body.dateOfBirth);
+          if (isNaN(d.getTime())) {
+            const err: any = new Error("Invalid dateOfBirth");
+            err.status = 400;
+            throw err;
+          }
+          employee.dateOfBirth = d as any;
+        }
+      }
+
+      await user.save({ transaction: t });
+      await employee.save({ transaction: t });
+    });
+
     return res.status(200).json({ message: "Employee updated successfully" });
-
-  } catch (error) {
-    return res.status(500).json({ message: "Internal Server Error" });
+  } catch (error: any) {
+    const status = error?.status || 500;
+    return res.status(status).json({ message: error?.message || "Internal Server Error", error });
   }
 };
 

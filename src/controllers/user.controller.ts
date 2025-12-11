@@ -58,7 +58,7 @@ export const createUser = async (req: Request, res: Response) => {
             createdBy: user ? user : name
         });
         await trans.commit();
-        return res.status(201).json({ message: "User created successfully"});
+        return res.status(201).json({ message: "User created successfully", id : newUser.id});
     } catch (error) {
         await trans.rollback();
         return res.status(500).json({ message: "Internal Server Error", error });
@@ -71,7 +71,7 @@ export const getAllUsers = async (req: Request, res: Response) => {
       include: [
         {
           model: User,
-          attributes: ["id", "name", "email", "role"], // exclude password
+          attributes: ["id", "name", "email", "role"], 
         },
       ],
       attributes: { exclude: ["createdAt", "updatedAt"] },
